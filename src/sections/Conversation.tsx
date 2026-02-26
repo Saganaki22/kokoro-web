@@ -83,6 +83,7 @@ export default function Conversation({ backend }: ConversationProps) {
   const [previewPlaying, setPreviewPlaying] = useState<string | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
+  const modelLoadedRef = useRef(false);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Initialize worker
@@ -109,6 +110,7 @@ export default function Conversation({ backend }: ConversationProps) {
 
       case 'modelLoaded':
         setModelLoaded(true);
+        modelLoadedRef.current = true;
         break;
 
       case 'progress':
@@ -292,21 +294,21 @@ export default function Conversation({ backend }: ConversationProps) {
                   className="flex items-center gap-2 px-3 py-2 bg-muted/50 hover:bg-primary/10 hover:text-primary rounded-xl border border-border/50 hover:border-primary/30 transition-all duration-200"
                 >
                   <span className="text-sm font-medium">{getVoiceDisplayName(speaker.voice)}</span>
-                  <Button
-                    variant="ghost"
-                    size="icon"
+                  <span
+                    role="button"
+                    tabIndex={0}
                     onClick={(e) => {
                       e.stopPropagation();
                       playVoicePreview(speaker.voice);
                     }}
-                    className="w-6 h-6 rounded-full hover:bg-primary/20"
+                    className="w-6 h-6 rounded-full hover:bg-primary/20 inline-flex items-center justify-center"
                   >
                     {previewPlaying === speaker.voice ? (
                       <Square className="w-3 h-3" />
                     ) : (
                       <Play className="w-3 h-3" />
                     )}
-                  </Button>
+                  </span>
                 </button>
                 <span className="text-xs text-muted-foreground">Speaker {index + 1}</span>
               </div>
@@ -429,18 +431,18 @@ export default function Conversation({ backend }: ConversationProps) {
                         }`}
                       >
                         <span className="text-sm font-medium">{voice.name}</span>
-                        <Button
-                          variant="ghost"
-                          size="icon"
+                        <span
+                          role="button"
+                          tabIndex={0}
                           onClick={(e) => playVoicePreview(voiceId, e)}
-                          className="w-7 h-7 rounded-full hover:bg-primary/20"
+                          className="w-7 h-7 rounded-full hover:bg-primary/20 inline-flex items-center justify-center"
                         >
                           {previewPlaying === voiceId ? (
                             <Square className="w-3 h-3" />
                           ) : (
                             <Play className="w-3 h-3" />
                           )}
-                        </Button>
+                        </span>
                       </button>
                     ))}
                   </div>
