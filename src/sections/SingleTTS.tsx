@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Play, 
   Square, 
@@ -18,7 +18,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
-// Voice data with sample URLs
+// Voice data
 const VOICE_DATA: Record<string, { name: string; region: string; gender: string; sample: string }> = {
   af_heart: { name: 'Heart', region: 'American', gender: 'Female', sample: 'https://cdn-uploads.huggingface.co/production/uploads/61b253b7ac5ecaae3d1efe0c/S_9tkA75BT_QHKOzSX6S-.wav' },
   af_alloy: { name: 'Alloy', region: 'American', gender: 'Female', sample: 'https://cdn-uploads.huggingface.co/production/uploads/61b253b7ac5ecaae3d1efe0c/wiZ3gvlL--p5pRItO4YRE.wav' },
@@ -57,12 +57,11 @@ const voiceGroups = {
   'British Male': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'British' && v.gender === 'Male'),
 };
 
-import { KokoroTTS } from '@/lib/kokoro.web.min.js';
-
 interface AudioEntry {
   id: number;
   text: string;
   voice: string;
+  format: 'mp3' | 'wav';
   blob: Blob;
   timestamp: number;
 }
@@ -76,7 +75,7 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
   const [voice, setVoice] = useState('af_heart');
   const [format, setFormat] = useState<'mp3' | 'wav'>('mp3');
   const [isLoading, setIsLoading] = useState(false);
-  const [modelLoaded, setModelLoaded] = useState(false);
+
   const [progress, setProgress] = useState(0);
   const [progressText, setProgressText] = useState('');
   const [status, setStatus] = useState<{ type: 'success' | 'error' | null; message: string }>({ type: null, message: '' });
@@ -85,7 +84,8 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
   const [showVoiceModal, setShowVoiceModal] = useState(false);
   const [previewPlaying, setPreviewPlaying] = useState<string | null>(null);
   
-  const ttsRef = useRef<any>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const modelLoadedRef = useRef(false);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlsRef = useRef<Map<number, string>>(new Map());
 
@@ -103,9 +103,13 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
     loadCached();
   }, []);
 
-  // Cleanup audio URLs on unmount
+  // Init worker
   useEffect(() => {
+    const base = import.meta.env.BASE_URL;
+    workerRef.current = new Worker(`${base}single-tts-worker.js`, { type: 'module' });
     return () => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
       audioUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
     };
   }, []);
@@ -167,83 +171,33 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
     });
   };
 
-  const loadModel = async () => {
-    if (modelLoaded && ttsRef.current) return;
-
-    setProgressText('Initializing...');
-    setProgress(10);
-
-    try {
-      const model_id = 'onnx-community/Kokoro-82M-ONNX';
+  const ensureModelLoaded = useCallback((): Promise<void> => {
+    if (modelLoadedRef.current) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const worker = workerRef.current!;
       const dtype = backend === 'WebGPU' ? 'q8' : 'q4f16';
 
-      setProgressText('Loading model...');
-      setProgress(30);
-
-      ttsRef.current = await KokoroTTS.from_pretrained(model_id, {
-        dtype,
-        progress_callback: (p: any) => {
-          if (p.status === 'progress') {
-            const percent = Math.round(p.progress);
-            setProgress(30 + percent * 0.6);
-            setProgressText(`Loading: ${percent}%`);
-          }
+      const handler = (e: MessageEvent) => {
+        const { type, ...data } = e.data;
+        if (type === 'modelLoaded') {
+          modelLoadedRef.current = true;
+          worker.removeEventListener('message', handler);
+          resolve();
+        } else if (type === 'modelProgress') {
+          const pct = 10 + data.progress * 0.6;
+          setProgress(pct);
+          setProgressText(`Loading: ${Math.round(data.progress)}%`);
+        } else if (type === 'error') {
+          worker.removeEventListener('message', handler);
+          reject(new Error(data.message));
         }
-      });
+      };
 
-      setModelLoaded(true);
-      setProgress(100);
-      setProgressText('Ready!');
-      
-      setTimeout(() => {
-        setProgress(0);
-        setProgressText('');
-      }, 500);
-    } catch (error: any) {
-      console.error('Error loading model:', error);
-      setStatus({ type: 'error', message: `Failed to load model: ${error.message}` });
-      throw error;
-    }
-  };
+      worker.addEventListener('message', handler);
+      worker.postMessage({ type: 'loadModel', data: { dtype } });
+    });
+  }, [backend]);
 
-  const createWavBlob = (audioData: Float32Array, sampleRate: number): Blob => {
-    const intData = new Int16Array(audioData.length);
-    for (let i = 0; i < audioData.length; i++) {
-      const s = Math.max(-1, Math.min(1, audioData[i]));
-      intData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
-
-    const wavBuffer = new ArrayBuffer(44 + intData.length * 2);
-    const view = new DataView(wavBuffer);
-
-    const writeString = (offset: number, string: string) => {
-      for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i));
-      }
-    };
-
-    writeString(0, 'RIFF');
-    view.setUint32(4, 36 + intData.length * 2, true);
-    writeString(8, 'WAVE');
-    writeString(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeString(36, 'data');
-    view.setUint32(40, intData.length * 2, true);
-
-    const bytes = new Uint8Array(wavBuffer, 44);
-    for (let i = 0; i < intData.length; i++) {
-      bytes[i * 2] = intData[i] & 0xFF;
-      bytes[i * 2 + 1] = (intData[i] >> 8) & 0xFF;
-    }
-
-    return new Blob([wavBuffer], { type: 'audio/wav' });
-  };
 
   const generateAudio = async () => {
     if (!text.trim()) {
@@ -253,39 +207,51 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
     }
 
     setIsLoading(true);
-    setProgress(20);
-    setProgressText('Starting...');
+    setProgress(10);
+    setProgressText('Loading model...');
     setStatus({ type: null, message: '' });
 
     try {
-      await loadModel();
+      await ensureModelLoaded();
 
-      setProgress(50);
+      setProgress(75);
       setProgressText('Synthesizing...');
 
-      const audio = await ttsRef.current.generate(text, { voice });
+      const worker = workerRef.current!;
 
-      setProgress(80);
-      setProgressText('Processing...');
+      await new Promise<void>((resolve, reject) => {
+        const handler = async (e: MessageEvent) => {
+          const { type, ...data } = e.data;
+          if (type === 'progress') {
+            setProgressText(data.message);
+          } else if (type === 'complete') {
+            worker.removeEventListener('message', handler);
+            setProgress(95);
+            setProgressText('Saving...');
+            const fmt: 'mp3' | 'wav' = data.format;
+            const mime = fmt === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+            const blob = new Blob([data.buffer], { type: mime });
+            const id = await addToDB({ text, voice, format: fmt, blob, timestamp: Date.now() });
+            const newEntry: AudioEntry = { id, text, voice, format: fmt, blob, timestamp: Date.now() };
+            setAudioHistory(prev => [newEntry, ...prev]);
+            setProgress(100);
+            setProgressText('Done!');
+            setTimeout(() => {
+              setProgress(0);
+              setProgressText('');
+              setStatus({ type: 'success', message: 'Audio generated successfully!' });
+              setTimeout(() => setStatus({ type: null, message: '' }), 2000);
+            }, 500);
+            resolve();
+          } else if (type === 'error') {
+            worker.removeEventListener('message', handler);
+            reject(new Error(data.message));
+          }
+        };
 
-      const audioData = audio.audio;
-      const sampleRate = audio.sampling_rate || 24000;
-      const blob = createWavBlob(audioData, sampleRate);
-
-      const id = await addToDB({ text, voice, blob, timestamp: Date.now() });
-      const newEntry: AudioEntry = { id, text, voice, blob, timestamp: Date.now() };
-      
-      setAudioHistory(prev => [newEntry, ...prev]);
-
-      setProgress(100);
-      setProgressText('Done!');
-      
-      setTimeout(() => {
-        setProgress(0);
-        setProgressText('');
-        setStatus({ type: 'success', message: 'Audio generated successfully!' });
-        setTimeout(() => setStatus({ type: null, message: '' }), 2000);
-      }, 500);
+        worker.addEventListener('message', handler);
+        worker.postMessage({ type: 'generate', data: { text, voice, sampleRate: 24000, format } });
+      });
     } catch (error: any) {
       console.error('Error:', error);
       setStatus({ type: 'error', message: `Error: ${error.message}` });
@@ -339,12 +305,13 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
     setTimeout(() => setStatus({ type: null, message: '' }), 2000);
   };
 
-  const downloadBlob = (blob: Blob, timestamp: number) => {
-    const time = new Date(timestamp).toISOString().replace(/[:.]/g, '-');
-    const url = URL.createObjectURL(blob);
+  const downloadBlob = (entry: AudioEntry) => {
+    const time = new Date(entry.timestamp).toISOString().replace(/[:.]/g, '-');
+    const ext = entry.format ?? 'wav';
+    const url = URL.createObjectURL(entry.blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `kokoro-tts-${time}.wav`;
+    link.download = `kokoro-tts-${time}.${ext}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -518,7 +485,7 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
                   <Button
                     variant="outline"
                     size="icon"
-                    onClick={() => downloadBlob(entry.blob, entry.timestamp)}
+                    onClick={() => downloadBlob(entry)}
                     className="shrink-0 rounded-lg border-border/50 hover:bg-primary/10 hover:text-primary hover:border-primary/30"
                   >
                     <Download className="w-4 h-4" />

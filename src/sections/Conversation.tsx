@@ -19,6 +19,7 @@ import { Progress } from '@/components/ui/progress';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 // Voice data
 const VOICE_DATA: Record<string, { name: string; region: string; gender: string; sample: string }> = {
@@ -72,81 +73,66 @@ export default function Conversation({ backend }: ConversationProps) {
   ]);
   const [nextId, setNextId] = useState(2);
   const [pauseSeconds, setPauseSeconds] = useState(0.5);
+  const [format, setFormat] = useState<'mp3' | 'wav'>('mp3');
   const [isLoading, setIsLoading] = useState(false);
-  const [modelLoaded, setModelLoaded] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressText, setProgressText] = useState('');
   const [status, setStatus] = useState<{ type: 'success' | 'error' | null; message: string }>({ type: null, message: '' });
   const [generatedAudio, setGeneratedAudio] = useState<string | null>(null);
+  const [generatedFormat, setGeneratedFormat] = useState<'mp3' | 'wav'>('mp3');
   const [showVoiceModal, setShowVoiceModal] = useState(false);
   const [selectedSpeakerId, setSelectedSpeakerId] = useState<number | null>(null);
   const [previewPlaying, setPreviewPlaying] = useState<string | null>(null);
 
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const modelLoadedRef = useRef(false);
-  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Initialize worker
   useEffect(() => {
-    workerRef.current = new Worker('/conversation-worker.js', { type: 'module' });
-    workerRef.current.onmessage = handleWorkerMessage;
-
+    // Both files are in public/ and served as static assets — Vite never bundles them.
+    // Using a plain string URL means Vite won't try to process the worker.
+    const base = import.meta.env.BASE_URL; // '/kokoro-web/'
+    workerRef.current = new Worker(`${base}conversation-worker.js`, { type: 'module' });
     return () => {
       workerRef.current?.terminate();
-      if (generatedAudio) {
-        URL.revokeObjectURL(generatedAudio);
-      }
+      workerRef.current = null;
     };
   }, []);
 
-  const handleWorkerMessage = (e: MessageEvent) => {
-    const { type, ...data } = e.data;
-
-    switch (type) {
-      case 'modelProgress':
-        setProgress(5 + data.progress * 0.15);
-        setProgressText(`Loading model: ${Math.round(data.progress)}%`);
-        break;
-
-      case 'modelLoaded':
-        setModelLoaded(true);
-        modelLoadedRef.current = true;
-        break;
-
-      case 'progress':
-        if (data.current && data.total) {
-          const p = 20 + (data.current / data.total) * 60;
-          setProgress(p);
-        }
-        setProgressText(data.message);
-        break;
-
-      case 'complete':
-        const blob = new Blob([data.wavBuffer], { type: 'audio/wav' });
-        if (generatedAudio) {
-          URL.revokeObjectURL(generatedAudio);
-        }
-        const url = URL.createObjectURL(blob);
-        setGeneratedAudio(url);
-        setProgress(100);
-        setProgressText('Done!');
-        setTimeout(() => {
-          setProgress(0);
-          setProgressText('');
-          setStatus({ type: 'success', message: 'Conversation generated!' });
-          setTimeout(() => setStatus({ type: null, message: '' }), 2000);
-        }, 500);
-        setIsLoading(false);
-        break;
-
-      case 'error':
-        setStatus({ type: 'error', message: `Error: ${data.message}` });
-        setIsLoading(false);
-        setProgress(0);
-        setProgressText('');
-        break;
-    }
+  const voiceGroups = {
+    'American Female': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'American' && v.gender === 'Female'),
+    'American Male': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'American' && v.gender === 'Male'),
+    'British Female': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'British' && v.gender === 'Female'),
+    'British Male': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'British' && v.gender === 'Male'),
   };
+
+  const ensureModelLoaded = (): Promise<void> => {
+    if (modelLoadedRef.current) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const worker = workerRef.current!;
+      const dtype = backend === 'WebGPU' ? 'q8' : 'q4f16';
+
+      const handler = (e: MessageEvent) => {
+        const { type, ...data } = e.data;
+        if (type === 'modelLoaded') {
+          modelLoadedRef.current = true;
+          worker.removeEventListener('message', handler);
+          resolve();
+        } else if (type === 'modelProgress') {
+          const pct = 5 + data.progress * 0.15;
+          setProgress(pct);
+          setProgressText(`Loading model: ${Math.round(data.progress)}%`);
+        } else if (type === 'error') {
+          worker.removeEventListener('message', handler);
+          reject(new Error(data.message));
+        }
+      };
+
+      worker.addEventListener('message', handler);
+      worker.postMessage({ type: 'loadModel', data: { dtype } });
+    });
+  };
+
 
   const addSpeaker = () => {
     if (speakers.length >= MAX_SPEAKERS) return;
@@ -177,17 +163,14 @@ export default function Conversation({ backend }: ConversationProps) {
 
   const playVoicePreview = (voiceId: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
-
     if (previewPlaying === voiceId) {
       previewAudioRef.current?.pause();
       setPreviewPlaying(null);
       return;
     }
-
     previewAudioRef.current?.pause();
     const voiceData = VOICE_DATA[voiceId];
     if (!voiceData) return;
-
     previewAudioRef.current = new Audio(voiceData.sample);
     previewAudioRef.current.onended = () => setPreviewPlaying(null);
     previewAudioRef.current.onerror = () => setPreviewPlaying(null);
@@ -208,31 +191,64 @@ export default function Conversation({ backend }: ConversationProps) {
     setProgressText('Loading model...');
     setStatus({ type: null, message: '' });
 
-    if (!modelLoadedRef.current) {
-      const dtype = backend === 'WebGPU' ? 'q8' : 'q4f16';
-      workerRef.current?.postMessage({ type: 'loadModel', data: { dtype } });
-      
-      await new Promise<void>(resolve => {
-        const check = () => {
-          if (modelLoadedRef.current) resolve();
-          else setTimeout(check, 100);
+    try {
+      await ensureModelLoaded();
+
+      setProgress(20);
+      setProgressText('Starting generation...');
+
+      const worker = workerRef.current!;
+
+      await new Promise<void>((resolve, reject) => {
+        const handler = (e: MessageEvent) => {
+          const { type, ...data } = e.data;
+          if (type === 'progress') {
+            if (data.current && data.total) {
+              setProgress(20 + (data.current / data.total) * 60);
+            }
+            setProgressText(data.message);
+          } else if (type === 'complete') {
+            worker.removeEventListener('message', handler);
+            const fmt: 'mp3' | 'wav' = data.format;
+            const mime = fmt === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+            const blob = new Blob([data.buffer], { type: mime });
+            setGeneratedFormat(fmt);
+            setGeneratedAudio(prev => {
+              if (prev) URL.revokeObjectURL(prev);
+              return URL.createObjectURL(blob);
+            });
+            setProgress(100);
+            setProgressText('Done!');
+            setTimeout(() => {
+              setProgress(0);
+              setProgressText('');
+              setStatus({ type: 'success', message: 'Conversation generated!' });
+              setTimeout(() => setStatus({ type: null, message: '' }), 2000);
+            }, 500);
+            resolve();
+          } else if (type === 'error') {
+            worker.removeEventListener('message', handler);
+            reject(new Error(data.message));
+          }
         };
-        check();
+
+        worker.addEventListener('message', handler);
+        worker.postMessage({
+          type: 'generate',
+          data: {
+            speakers: validSpeakers.map(s => ({ text: s.text, voice: s.voice })),
+            pauseSeconds,
+            sampleRate: 24000,
+            format,
+          }
+        });
       });
+    } catch (error: any) {
+      console.error('Error:', error);
+      setStatus({ type: 'error', message: `Error: ${error.message}` });
+    } finally {
+      setIsLoading(false);
     }
-
-    setProgress(20);
-    setProgressText('Starting generation...');
-
-    const speakerData = validSpeakers.map(s => ({ text: s.text, voice: s.voice }));
-    workerRef.current?.postMessage({
-      type: 'generate',
-      data: {
-        speakers: speakerData,
-        pauseSeconds,
-        sampleRate: 24000
-      }
-    });
   };
 
   const downloadAudio = () => {
@@ -240,8 +256,10 @@ export default function Conversation({ backend }: ConversationProps) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const link = document.createElement('a');
     link.href = generatedAudio;
-    link.download = `kokoro-conversation-${timestamp}.wav`;
+    link.download = `kokoro-conversation-${timestamp}.${generatedFormat}`;
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
   };
 
   const getVoiceDisplayName = (voiceId: string) => {
@@ -249,21 +267,13 @@ export default function Conversation({ backend }: ConversationProps) {
     return v ? `${v.name} (${v.region})` : voiceId;
   };
 
-  // Group voices by region and gender
-  const voiceGroups = {
-    'American Female': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'American' && v.gender === 'Female'),
-    'American Male': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'American' && v.gender === 'Male'),
-    'British Female': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'British' && v.gender === 'Female'),
-    'British Male': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'British' && v.gender === 'Male'),
-  };
-
   return (
     <div className="space-y-6">
       {/* Settings Card */}
-      <div className="glass rounded-2xl p-4 flex items-center gap-4">
-        <Settings2 className="w-5 h-5 text-muted-foreground" />
-        <div className="flex items-center gap-3 flex-1">
-          <label className="text-sm text-muted-foreground">Pause between speakers</label>
+      <div className="glass rounded-2xl p-4 flex flex-wrap items-center gap-4">
+        <Settings2 className="w-5 h-5 text-muted-foreground shrink-0" />
+        <div className="flex items-center gap-3">
+          <label className="text-sm text-muted-foreground whitespace-nowrap">Pause between speakers</label>
           <div className="flex items-center gap-2">
             <Input
               type="number"
@@ -277,13 +287,25 @@ export default function Conversation({ backend }: ConversationProps) {
             <span className="text-sm text-muted-foreground">seconds</span>
           </div>
         </div>
+        <div className="flex items-center gap-3 ml-auto">
+          <label className="text-sm text-muted-foreground">Format</label>
+          <Select value={format} onValueChange={(v) => setFormat(v as 'mp3' | 'wav')}>
+            <SelectTrigger className="w-24 h-9 bg-muted/50 border-border/50 rounded-lg">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="mp3">MP3</SelectItem>
+              <SelectItem value="wav">WAV</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {/* Speakers */}
       <div className="space-y-4">
         {speakers.map((speaker, index) => (
-          <div 
-            key={speaker.id} 
+          <div
+            key={speaker.id}
             className="glass rounded-2xl p-5 space-y-4 animate-in"
             style={{ animationDelay: `${index * 50}ms` }}
           >
@@ -297,17 +319,10 @@ export default function Conversation({ backend }: ConversationProps) {
                   <span
                     role="button"
                     tabIndex={0}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      playVoicePreview(speaker.voice);
-                    }}
+                    onClick={(e) => { e.stopPropagation(); playVoicePreview(speaker.voice); }}
                     className="w-6 h-6 rounded-full hover:bg-primary/20 inline-flex items-center justify-center"
                   >
-                    {previewPlaying === speaker.voice ? (
-                      <Square className="w-3 h-3" />
-                    ) : (
-                      <Play className="w-3 h-3" />
-                    )}
+                    {previewPlaying === speaker.voice ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
                   </span>
                 </button>
                 <span className="text-xs text-muted-foreground">Speaker {index + 1}</span>
@@ -351,15 +366,9 @@ export default function Conversation({ backend }: ConversationProps) {
         className="w-full h-12 rounded-xl bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 text-primary-foreground font-medium shadow-lg shadow-primary/20 hover:shadow-primary/30 hover:-translate-y-0.5 transition-all duration-200"
       >
         {isLoading ? (
-          <>
-            <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-            Generating...
-          </>
+          <><Loader2 className="w-5 h-5 mr-2 animate-spin" />Generating...</>
         ) : (
-          <>
-            <Users className="w-5 h-5 mr-2" />
-            Generate Conversation
-          </>
+          <><Users className="w-5 h-5 mr-2" />Generate Conversation</>
         )}
       </Button>
 
@@ -373,15 +382,11 @@ export default function Conversation({ backend }: ConversationProps) {
 
       {/* Status */}
       {status.type && (
-        <Alert 
+        <Alert
           variant={status.type === 'error' ? 'destructive' : 'default'}
           className={`animate-in ${status.type === 'success' ? 'bg-[hsl(var(--success))]/10 text-[hsl(var(--success))] border-[hsl(var(--success))]/20' : ''}`}
         >
-          {status.type === 'success' ? (
-            <CheckCircle2 className="h-4 w-4" />
-          ) : (
-            <AlertCircle className="h-4 w-4" />
-          )}
+          {status.type === 'success' ? <CheckCircle2 className="h-4 w-4" /> : <AlertCircle className="h-4 w-4" />}
           <AlertDescription>{status.message}</AlertDescription>
         </Alert>
       )}
@@ -415,16 +420,14 @@ export default function Conversation({ backend }: ConversationProps) {
             <div className="px-6 pb-2 space-y-4">
               {Object.entries(voiceGroups).map(([groupName, voices]) => (
                 <div key={groupName} className="space-y-2">
-                  <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                    {groupName}
-                  </h4>
+                  <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{groupName}</h4>
                   <div className="space-y-1">
                     {voices.map(([voiceId, voice]) => (
                       <button
                         key={voiceId}
                         onClick={() => selectVoice(voiceId)}
                         className={`w-full flex items-center justify-between p-3 rounded-xl border transition-all duration-200 ${
-                          selectedSpeakerId !== null && 
+                          selectedSpeakerId !== null &&
                           speakers.find(s => s.id === selectedSpeakerId)?.voice === voiceId
                             ? 'border-primary bg-primary/10'
                             : 'border-border/50 hover:border-primary/30 hover:bg-muted/50'
@@ -437,11 +440,7 @@ export default function Conversation({ backend }: ConversationProps) {
                           onClick={(e) => playVoicePreview(voiceId, e)}
                           className="w-7 h-7 rounded-full hover:bg-primary/20 inline-flex items-center justify-center"
                         >
-                          {previewPlaying === voiceId ? (
-                            <Square className="w-3 h-3" />
-                          ) : (
-                            <Play className="w-3 h-3" />
-                          )}
+                          {previewPlaying === voiceId ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
                         </span>
                       </button>
                     ))}

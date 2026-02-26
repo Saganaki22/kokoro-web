@@ -26,44 +26,20 @@ self.onmessage = async (e) => {
 
   if (type === 'generate') {
     try {
-      const { speakers, pauseSeconds, sampleRate, format } = data;
-      const pauseSamples = Math.floor(pauseSeconds * sampleRate);
-      const audioParts = [];
-      const total = speakers.length;
+      const { text, voice, sampleRate, format } = data;
 
-      for (let i = 0; i < total; i++) {
-        self.postMessage({
-          type: 'progress',
-          current: i + 1,
-          total,
-          message: `Generating speaker ${i + 1}/${total}...`
-        });
+      self.postMessage({ type: 'progress', message: 'Synthesizing...' });
 
-        const audio = await tts.generate(speakers[i].text, { voice: speakers[i].voice });
-        audioParts.push(audio.audio);
-
-        if (i < total - 1) {
-          audioParts.push(new Float32Array(pauseSamples));
-        }
-      }
-
-      self.postMessage({ type: 'progress', message: 'Stitching audio...' });
-
-      const totalLength = audioParts.reduce((sum, arr) => sum + arr.length, 0);
-      const combined = new Float32Array(totalLength);
-      let offset = 0;
-      for (const part of audioParts) {
-        combined.set(part, offset);
-        offset += part.length;
-      }
+      const audio = await tts.generate(text, { voice });
+      const sr = audio.sampling_rate || sampleRate;
 
       self.postMessage({ type: 'progress', message: `Encoding ${format === 'mp3' ? 'MP3' : 'WAV'}...` });
 
       if (format === 'mp3') {
-        const mp3Buffer = encodeMp3(combined, sampleRate);
+        const mp3Buffer = encodeMp3(audio.audio, sr);
         self.postMessage({ type: 'complete', buffer: mp3Buffer, format: 'mp3' }, [mp3Buffer]);
       } else {
-        const wavBuffer = createWavBuffer(combined, sampleRate);
+        const wavBuffer = createWavBuffer(audio.audio, sr);
         self.postMessage({ type: 'complete', buffer: wavBuffer.buffer, format: 'wav' }, [wavBuffer.buffer]);
       }
     } catch (error) {
@@ -92,10 +68,10 @@ function encodeMp3(audioData, sampleRate) {
 
   const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
   const result = new Uint8Array(totalLength);
-  let off = 0;
+  let offset = 0;
   for (const chunk of chunks) {
-    result.set(chunk, off);
-    off += chunk.length;
+    result.set(chunk, offset);
+    offset += chunk.length;
   }
   return result.buffer;
 }
