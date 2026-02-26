@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "homepage": "https://saganaki22.github.io/kokoro-web",
+  "homepage": "https://drbaph.is-a.dev/kokoro-web",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
