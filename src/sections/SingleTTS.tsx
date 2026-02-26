@@ -57,6 +57,8 @@ const voiceGroups = {
   'British Male': Object.entries(VOICE_DATA).filter(([_, v]) => v.region === 'British' && v.gender === 'Male'),
 };
 
+import { KokoroTTS } from '@/lib/kokoro.web.min.js';
+
 interface AudioEntry {
   id: number;
   text: string;
@@ -68,9 +70,6 @@ interface AudioEntry {
 interface SingleTTSProps {
   backend: 'WebGPU' | 'CPU';
 }
-
-// @ts-ignore - KokoroTTS is loaded from script
-let KokoroTTS: any = null;
 
 export default function SingleTTS({ backend }: SingleTTSProps) {
   const [text, setText] = useState('');
@@ -175,12 +174,6 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
     setProgress(10);
 
     try {
-      // Dynamically import KokoroTTS
-      if (!KokoroTTS) {
-        const module = await import(/* @vite-ignore */ '@/lib/kokoro.web.min.js');
-        KokoroTTS = module.KokoroTTS;
-      }
-
       const model_id = 'onnx-community/Kokoro-82M-ONNX';
       const dtype = backend === 'WebGPU' ? 'q8' : 'q4f16';
 
