@@ -383,16 +383,18 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-2">
             <label className="text-sm font-medium text-muted-foreground">Voice</label>
-            <button
-              onClick={() => setShowVoiceModal(true)}
-              className="w-full flex items-center justify-between px-4 py-2.5 bg-muted/50 border border-border/50 rounded-xl hover:border-primary/30 hover:bg-primary/5 transition-all duration-200"
-            >
-              <span className="text-sm font-medium">{getVoiceDisplayName(voice)}</span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowVoiceModal(true)}
+                className="flex-1 flex items-center justify-between px-4 py-2.5 bg-muted/50 border border-border/50 rounded-xl hover:border-primary/30 hover:bg-primary/5 transition-all duration-200"
+              >
+                <span className="text-sm font-medium">{getVoiceDisplayName(voice)}</span>
+              </button>
               <Button
-                variant="ghost"
+                variant="outline"
                 size="icon"
                 onClick={(e) => playVoicePreview(voice, e)}
-                className="w-7 h-7 rounded-full hover:bg-primary/20"
+                className="shrink-0 rounded-xl border-border/50 hover:bg-primary/10 hover:text-primary hover:border-primary/30"
               >
                 {previewPlaying === voice ? (
                   <Square className="w-3 h-3" />
@@ -400,7 +402,7 @@ export default function SingleTTS({ backend }: SingleTTSProps) {
                   <Play className="w-3 h-3" />
                 )}
               </Button>
-            </button>
+            </div>
           </div>
 
           <div className="space-y-2">
