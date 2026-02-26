@@ -208,13 +208,13 @@ export default function Conversation({ backend }: ConversationProps) {
     setProgressText('Loading model...');
     setStatus({ type: null, message: '' });
 
-    if (!modelLoaded) {
+    if (!modelLoadedRef.current) {
       const dtype = backend === 'WebGPU' ? 'q8' : 'q4f16';
       workerRef.current?.postMessage({ type: 'loadModel', data: { dtype } });
       
       await new Promise<void>(resolve => {
         const check = () => {
-          if (modelLoaded) resolve();
+          if (modelLoadedRef.current) resolve();
           else setTimeout(check, 100);
         };
         check();
